@@ -1,0 +1,42 @@
+{
+  "name": "openclaw-wechat-gateway",
+  "version": "0.2.0",
+  "private": true,
+  "description": "ECS gateway between Openclaw and local wechat-publisher-agent",
+  "type": "module",
+  "main": "dist/app/server.js",
+  "scripts": {
+    "dev": "tsx watch src/app/server.ts",
+    "start": "tsx src/app/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start:prod": "node dist/app/server.js",
+    "check": "tsc --noEmit",
+    "db:migrate": "tsx src/repo/sqlite/migrations.ts",
+    "test": "tsx --test src/**/*.test.ts",
+    "test:content-pipeline": "tsx --test src/content-pipeline/**/*.test.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "hast-util-sanitize": "^5.0.2",
+    "rehype-parse": "^9.0.1",
+    "rehype-sanitize": "^6.0.0",
+    "rehype-stringify": "^10.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
+    "unified": "^11.0.5",
+    "unist-util-visit": "^5.0.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
