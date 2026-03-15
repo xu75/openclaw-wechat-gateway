@@ -1,0 +1,4 @@
+id,task_id,from_status,to_status,reason,created_at
+6e7f29c5-3c8a-4481-8c1d-0b1cfd0aae49,mdpub-chat-oc-9b62e63a018a3aee82420c3dc9c622dc-20260313030756,approved,publishing,initial_publish,2026-03-13T03:07:57.013Z
+a0ca671e-535e-43bf-b041-d62d420f37b7,mdpub-chat-oc-9b62e63a018a3aee82420c3dc9c622dc-20260313030756,,approved,task_initialized,2026-03-13T03:07:57.012Z
+7a633997-e65d-4dd2-b711-6bdebbb87b2d,mdpub-chat-oc-9b62e63a018a3aee82420c3dc9c622dc-20260313030756,publishing,published,agent_accepted,2026-03-13T03:08:32.627Z

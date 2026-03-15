@@ -1,5 +1,5 @@
 import type { PublishTask } from '../../contracts/domain.js';
-import type { PublishTaskRepo } from '../publish-task.repo.js';
+import type { PublishTaskCompareAndUpdateInput, PublishTaskRepo } from '../publish-task.repo.js';
 import type { SqliteDatabase, SqliteTx, SqliteWriteOptions } from './client.js';
 import { resolveDb } from './client.js';
 import { mapSqliteConstraintError, RepoNotFoundError } from './errors.js';
@@ -131,6 +131,10 @@ export class SqlitePublishTaskRepo implements PublishTaskRepo {
     return this.updateSync(taskId, patch, options);
   }
 
+  async compareAndUpdate(input: PublishTaskCompareAndUpdateInput, options?: SqliteWriteOptions): Promise<PublishTask | null> {
+    return this.compareAndUpdateSync(input, options);
+  }
+
   updateInTx(taskId: string, patch: Partial<PublishTask>, tx: SqliteTx): PublishTask {
     return this.updateSync(taskId, patch, { tx });
   }
@@ -163,6 +167,60 @@ export class SqlitePublishTaskRepo implements PublishTaskRepo {
       const updated = this.findByTaskIdSync(taskId, options);
       if (!updated) {
         throw new RepoNotFoundError(`publish task not found after update: ${taskId}`);
+      }
+      return updated;
+    } catch (error) {
+      if (error instanceof RepoNotFoundError) {
+        throw error;
+      }
+      throw mapSqliteConstraintError(error);
+    }
+  }
+
+  compareAndUpdateInTx(input: PublishTaskCompareAndUpdateInput, tx: SqliteTx): PublishTask | null {
+    return this.compareAndUpdateSync(input, { tx });
+  }
+
+  compareAndUpdateSync(input: PublishTaskCompareAndUpdateInput, options?: SqliteWriteOptions): PublishTask | null {
+    const conn = this.pickDb(options);
+    const params: Record<string, unknown> = {
+      task_id: input.taskId
+    };
+    const updates: string[] = [];
+    const conditions: string[] = ['task_id = @task_id'];
+
+    for (const field of UPDATABLE_TASK_FIELDS) {
+      const value = input.patch[field];
+      if (value === undefined) {
+        continue;
+      }
+      params[field] = value;
+      updates.push(`${field} = @${field}`);
+    }
+
+    if (input.expected.status !== undefined) {
+      params.expected_status = input.expected.status;
+      conditions.push('status = @expected_status');
+    }
+    if (input.expected.retry_count !== undefined) {
+      params.expected_retry_count = input.expected.retry_count;
+      conditions.push('retry_count = @expected_retry_count');
+    }
+
+    const nowIso = this.now().toISOString();
+    params.updated_at = nowIso;
+    updates.push('updated_at = @updated_at');
+
+    const sql = `UPDATE publish_tasks SET ${updates.join(', ')} WHERE ${conditions.join(' AND ')}`;
+
+    try {
+      const result = conn.prepare(sql).run(params);
+      if (result.changes === 0) {
+        return null;
+      }
+      const updated = this.findByTaskIdSync(input.taskId, options);
+      if (!updated) {
+        throw new RepoNotFoundError(`publish task not found after compareAndUpdate: ${input.taskId}`);
       }
       return updated;
     } catch (error) {

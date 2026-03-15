@@ -48,9 +48,12 @@ interface ApiSuccess<PublishTaskView> {
 
 1. Validate request and apply idempotency checks.
 2. Run content pipeline in gateway: markdown/html normalize -> sanitize -> image policy rewrite.
-3. Send signed `/publish` request to agent.
-4. Transition task state and append event/audit logs.
-5. Return task view.
+3. Strict image policy: if `failed_images` is non-empty, request fails immediately with `422 IMAGE_POLICY_VIOLATION`.
+4. On `IMAGE_POLICY_VIOLATION`, gateway must not call agent `/publish`.
+5. Error `details` includes `failed_images` and `replaced_count`.
+6. Send signed `/publish` request to agent.
+7. Transition task state and append event/audit logs.
+8. Return task view.
 
 ## 2) POST /wechat/publish/:task_id/confirm-login
 
@@ -153,3 +156,24 @@ Single source of truth is in [`src/contracts/http.ts`](../src/contracts/http.ts)
 9. `WAITING_LOGIN_TIMEOUT` -> 409
 10. `NOT_IMPLEMENTED` -> 501
 11. `INTERNAL_ERROR` -> 500
+
+### IMAGE_POLICY_VIOLATION Details
+
+`IMAGE_POLICY_VIOLATION` response shape (example):
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "IMAGE_POLICY_VIOLATION",
+    "message": "image policy violation: invalid image URLs are not allowed",
+    "details": {
+      "replaced_count": 2,
+      "failed_images": [
+        { "source": "./foo.png", "reason": "relative image path is not allowed" },
+        { "source": "http://example.com/a.png", "reason": "image URL must use HTTPS" }
+      ]
+    }
+  }
+}
+```

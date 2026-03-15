@@ -44,14 +44,21 @@ curl -sS -X POST 'http://127.0.0.1:3000/wechat/publish/task-demo-1/confirm-login
 
 1. Agent 不可用：`AGENT_UNAVAILABLE` 或 `AGENT_HTTP_5xx` 激增。
 2. 登录超时：`waiting_login` -> `manual_intervention`，`error_code=WAITING_LOGIN_TIMEOUT`。
-3. 签名异常：`AGENT_SIGNATURE_ERROR` + `signature_anomaly` 告警。
-4. 告警 webhook 失败：stderr 出现 `alert_delivery_error`。
+3. 图片策略违规：`IMAGE_POLICY_VIOLATION`（常见于相对路径、`http`、`data:`、`file:` 图片 URL）。
+4. 签名异常：`AGENT_SIGNATURE_ERROR` + `signature_anomaly` 告警。
+5. 告警 webhook 失败：stderr 出现 `alert_delivery_error`。
 
 ## 4) 排查步骤
 
 1. 先按 `request_id` 聚合同一请求日志。
 2. 再按 `task_id` 看状态迁移日志与错误码。
 3. 到 sqlite 回放任务、事件、审计。
+
+图片策略违规专项检查：
+- 看 API 返回 `error.code=IMAGE_POLICY_VIOLATION`。
+- 看 `error.details.failed_images` 里的 `source` 和 `reason`。
+- 修正文案中的非法图片 URL 后重试（要求绝对 HTTPS）。
+- 该类失败不会调用 agent `/publish`，若发现 agent 有调用，属于缺陷。
 
 ## 5) sqlite 回放命令
 

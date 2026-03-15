@@ -6,7 +6,15 @@ import type { ContentPipelineInput, ContentPipelineResult } from '../../content-
 import type { AlertType } from '../../notifier/alert.types.js';
 import type { AuditLogRepo } from '../../repo/audit-log.repo.js';
 import type { PublishEventRepo } from '../../repo/publish-event.repo.js';
-import type { PublishTaskRepo } from '../../repo/publish-task.repo.js';
+import type {
+  PublishTaskCompareAndUpdateExpected,
+  PublishTaskRepo,
+  PublishTaskTransitionAtomicRepo
+} from '../../repo/publish-task.repo.js';
+import {
+  buildIdempotencyConflictDetails,
+  isPublishTaskIdempotencyUniqueConflict
+} from '../../repo/sqlite/errors.js';
 import { AgentClientError } from '../../agent-client/errors.js';
 import { AppError } from '../../api/middleware/error-handler.js';
 import { logError, logInfo } from '../../observability/logger.js';
@@ -23,6 +31,7 @@ export interface PublishRepoDeps {
   tasks: PublishTaskRepo;
   events: PublishEventRepo;
   audits: AuditLogRepo;
+  atomicTransition: PublishTaskTransitionAtomicRepo;
 }
 
 export interface PublishAgentClient {
@@ -38,7 +47,13 @@ export interface PublishNotifier {
 }
 
 export interface PublishReviewTokenFactory {
-  create(input: { taskId: string; idempotencyKey: string }): string;
+  create(input: {
+    taskId: string;
+    idempotencyKey: string;
+    title: string;
+    content: string;
+    preferredChannel: 'browser' | 'official';
+  }): string;
 }
 
 export interface PublishOrchestratorDeps {
@@ -134,6 +149,21 @@ export class PublishOrchestrator implements IPublishOrchestrator {
 
     const contentFormat = input.content_format ?? 'html';
     const channel = input.preferred_channel ?? 'browser';
+    const pipelineResult = await this.deps.contentPipeline.run({
+      content: input.content,
+      content_format: contentFormat
+    });
+    if (pipelineResult.failed_images.length > 0) {
+      throw new AppError('image policy violation: invalid image URLs are not allowed', {
+        code: 'IMAGE_POLICY_VIOLATION',
+        status: 422,
+        details: {
+          replaced_count: pipelineResult.replaced_count,
+          failed_images: pipelineResult.failed_images
+        }
+      });
+    }
+
     const nowIso = this.nowIso();
 
     const initializedTask: PublishTask = {
@@ -143,8 +173,8 @@ export class PublishOrchestrator implements IPublishOrchestrator {
       channel,
       title: input.title,
       content_format: contentFormat,
-      content_hash: sha256Hex(input.content),
-      content_html: input.content,
+      content_hash: sha256Hex(pipelineResult.content_html),
+      content_html: pipelineResult.content_html,
       login_session_id: null,
       login_session_expires_at: null,
       login_qr_mime: null,
@@ -157,7 +187,14 @@ export class PublishOrchestrator implements IPublishOrchestrator {
       updated_at: nowIso
     };
 
-    await this.deps.repo.tasks.create(initializedTask);
+    try {
+      await this.deps.repo.tasks.create(initializedTask);
+    } catch (error) {
+      throw this.mapCreateConflictError(error, {
+        task_id: taskId,
+        idempotency_key: idempotencyKey
+      });
+    }
     await this.appendEvent(taskId, null, 'approved', 'task_initialized');
     await this.appendAudit({
       task_id: taskId,
@@ -171,12 +208,6 @@ export class PublishOrchestrator implements IPublishOrchestrator {
         preferred_channel: channel
       }
     });
-
-    const pipelineResult = await this.deps.contentPipeline.run({
-      content: input.content,
-      content_format: contentFormat
-    });
-
     await this.appendAudit({
       task_id: taskId,
       stage: 'content_pipeline_result',
@@ -186,13 +217,7 @@ export class PublishOrchestrator implements IPublishOrchestrator {
         failed_images: pipelineResult.failed_images
       }
     });
-
-    const taskWithPipeline = await this.deps.repo.tasks.update(taskId, {
-      content_html: pipelineResult.content_html,
-      content_hash: sha256Hex(pipelineResult.content_html)
-    });
-
-    const publishingTask = await this.transition(taskWithPipeline, 'publishing', 'initial_publish');
+    const publishingTask = await this.transition(initializedTask, 'publishing', 'initial_publish');
     return this.publishOnce(publishingTask, 'initial_publish');
   }
 
@@ -238,9 +263,24 @@ export class PublishOrchestrator implements IPublishOrchestrator {
       });
     }
 
-    const publishingTask = await this.transition(task, 'publishing', 'confirm_login_retry_once', {
-      retry_count: task.retry_count + 1
+    const publishingTask = await this.transitionWithCas(task, 'publishing', 'confirm_login_retry_once', {
+      patch: {
+        retry_count: 1
+      },
+      expected: {
+        status: 'waiting_login',
+        retry_count: 0
+      }
     });
+    if (!publishingTask) {
+      throw new AppError('confirm-login already consumed by another request', {
+        code: 'STATUS_CONFLICT',
+        details: {
+          current_status: task.status,
+          retry_count: task.retry_count
+        }
+      });
+    }
     return this.publishOnce(publishingTask, 'confirm_login');
   }
 
@@ -275,7 +315,10 @@ export class PublishOrchestrator implements IPublishOrchestrator {
   private async publishOnce(task: PublishTask, trigger: PublishTrigger): Promise<PublishTask> {
     const reviewToken = this.deps.reviewTokenFactory.create({
       taskId: task.task_id,
-      idempotencyKey: task.idempotency_key
+      idempotencyKey: task.idempotency_key,
+      title: task.title,
+      content: task.content_html,
+      preferredChannel: task.channel
     });
 
     const payload: AgentPublishRequest = {
@@ -493,22 +536,36 @@ export class PublishOrchestrator implements IPublishOrchestrator {
     patch: Partial<PublishTask> = {}
   ): Promise<PublishTask> {
     assertTransition(task.status, toStatus);
-
-    const updated = await this.deps.repo.tasks.update(task.task_id, {
+    const patchWithStatus: Partial<PublishTask> = {
       ...patch,
       status: toStatus
-    });
-
-    await this.appendEvent(task.task_id, task.status, toStatus, reason);
-    await this.appendAudit({
+    };
+    const event: PublishEvent = {
+      id: this.idFactory(),
+      task_id: task.task_id,
+      from_status: task.status,
+      to_status: toStatus,
+      reason,
+      created_at: this.nowIso()
+    };
+    const audit: PublishAuditLog = {
+      id: this.idFactory(),
       task_id: task.task_id,
       stage: 'status_transition',
       trigger: reason,
-      payload: {
+      payload_json: JSON.stringify({
         from_status: task.status,
         to_status: toStatus,
         patch
-      }
+      }),
+      created_at: this.nowIso()
+    };
+
+    const updated = await this.deps.repo.atomicTransition.applyStatusTransition({
+      taskId: task.task_id,
+      patch: patchWithStatus,
+      event,
+      audit
     });
     if (toStatus === 'publish_failed' || toStatus === 'manual_intervention') {
       logError('task_status_transition', {
@@ -532,6 +589,51 @@ export class PublishOrchestrator implements IPublishOrchestrator {
     }
 
     return updated;
+  }
+
+  private async transitionWithCas(
+    task: PublishTask,
+    toStatus: PublishTask['status'],
+    reason: string,
+    input: {
+      patch?: Partial<PublishTask>;
+      expected: PublishTaskCompareAndUpdateExpected;
+    }
+  ): Promise<PublishTask | null> {
+    assertTransition(task.status, toStatus);
+    const patchWithStatus: Partial<PublishTask> = {
+      ...(input.patch ?? {}),
+      status: toStatus
+    };
+    const event: PublishEvent = {
+      id: this.idFactory(),
+      task_id: task.task_id,
+      from_status: task.status,
+      to_status: toStatus,
+      reason,
+      created_at: this.nowIso()
+    };
+    const audit: PublishAuditLog = {
+      id: this.idFactory(),
+      task_id: task.task_id,
+      stage: 'status_transition',
+      trigger: reason,
+      payload_json: JSON.stringify({
+        from_status: task.status,
+        to_status: toStatus,
+        patch: input.patch ?? {},
+        expected: input.expected
+      }),
+      created_at: this.nowIso()
+    };
+
+    return this.deps.repo.atomicTransition.applyStatusTransitionWithCas({
+      taskId: task.task_id,
+      expected: input.expected,
+      patch: patchWithStatus,
+      event,
+      audit
+    });
   }
 
   private computeEffectiveLoginExpiry(agentExpiresAt: string | undefined): string {
@@ -628,6 +730,24 @@ export class PublishOrchestrator implements IPublishOrchestrator {
   private nowIso(): string {
     return this.now().toISOString();
   }
+
+  private mapCreateConflictError(
+    error: unknown,
+    input: {
+      task_id: string;
+      idempotency_key: string;
+    }
+  ): Error {
+    if (!isPublishTaskIdempotencyUniqueConflict(error)) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+
+    return new AppError('task_id/idempotency_key conflict', {
+      code: 'IDEMPOTENCY_CONFLICT',
+      status: 409,
+      details: buildIdempotencyConflictDetails(error, input)
+    });
+  }
 }
 
 function sha256Hex(value: string): string {
@@ -654,7 +774,8 @@ function createUnwiredDeps(): PublishOrchestratorDeps {
         findByTaskId: async () => notWired(),
         findByIdempotencyKey: async () => notWired(),
         create: async () => notWired(),
-        update: async () => notWired()
+        update: async () => notWired(),
+        compareAndUpdate: async () => notWired()
       },
       events: {
         append: async () => notWired(),
@@ -663,6 +784,10 @@ function createUnwiredDeps(): PublishOrchestratorDeps {
       audits: {
         append: async () => notWired(),
         listByTaskId: async () => notWired()
+      },
+      atomicTransition: {
+        applyStatusTransition: async () => notWired(),
+        applyStatusTransitionWithCas: async () => notWired()
       }
     },
     agentClient: {

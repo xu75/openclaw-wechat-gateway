@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 function toBase64Url(input: Buffer | string): string {
   return Buffer.from(input)
@@ -14,7 +14,29 @@ export interface ReviewTokenInput {
   ttlSeconds: number;
   taskId: string;
   idempotencyKey: string;
+  title: string;
+  content: string;
+  preferredChannel: 'browser' | 'official';
+  thumbMediaId?: string;
+  author?: string;
+  digest?: string;
+  contentSourceUrl?: string;
   nowSeconds?: number;
+}
+
+function computePublishContentHash(input: ReviewTokenInput): string {
+  const payload = JSON.stringify({
+    task_id: input.taskId,
+    title: input.title,
+    content: input.content,
+    preferred_channel: input.preferredChannel || 'official',
+    thumb_media_id: input.thumbMediaId || '',
+    author: input.author || '',
+    digest: input.digest || '',
+    content_source_url: input.contentSourceUrl || ''
+  });
+
+  return createHash('sha256').update(payload, 'utf8').digest('hex');
 }
 
 export function createReviewToken(input: ReviewTokenInput): string {
@@ -22,7 +44,8 @@ export function createReviewToken(input: ReviewTokenInput): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const payload = {
     iss: input.issuer ?? 'ecs-review',
-    sub: input.taskId,
+    task_id: input.taskId,
+    content_hash: computePublishContentHash(input),
     iat: now,
     exp: now + input.ttlSeconds,
     review_approved: true,

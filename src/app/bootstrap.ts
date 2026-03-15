@@ -11,6 +11,7 @@ import { openSqlite } from '../repo/sqlite/client.js';
 import { SqlitePublishTaskRepo } from '../repo/sqlite/publish-task.sqlite.repo.js';
 import { SqlitePublishEventRepo } from '../repo/sqlite/publish-event.sqlite.repo.js';
 import { SqliteAuditLogRepo } from '../repo/sqlite/audit-log.sqlite.repo.js';
+import { SqlitePublishTaskTransitionAtomicRepo } from '../repo/sqlite/task-event.atomic.js';
 import { runContentPipeline } from '../content-pipeline/index.js';
 import { PublisherClient } from '../agent-client/publisher-client.js';
 import { createReviewToken } from '../agent-client/token.js';
@@ -25,6 +26,7 @@ export function createServer(): Express {
   const tasks = new SqlitePublishTaskRepo(db);
   const events = new SqlitePublishEventRepo(db);
   const audits = new SqliteAuditLogRepo(db);
+  const atomicTransition = new SqlitePublishTaskTransitionAtomicRepo(db, tasks, events, audits);
   const publisherClient = new PublisherClient({
     baseUrl: env.agentBaseUrl,
     signingSecret: env.signingSecret
@@ -100,7 +102,8 @@ export function createServer(): Express {
     repo: {
       tasks,
       events,
-      audits
+      audits,
+      atomicTransition
     },
     agentClient: {
       publish: (payload) => publisherClient.publish(payload)
@@ -112,13 +115,16 @@ export function createServer(): Express {
       send: (type, payload) => alertNotifier.send(type, payload)
     },
     reviewTokenFactory: {
-      create: ({ taskId, idempotencyKey }) =>
+      create: ({ taskId, idempotencyKey, title, content, preferredChannel }) =>
         createReviewToken({
           secret: env.reviewTokenSecret,
           issuer: env.reviewTokenIssuer,
           ttlSeconds: env.reviewTokenTtlSeconds,
           taskId,
-          idempotencyKey
+          idempotencyKey,
+          title,
+          content,
+          preferredChannel
         })
     },
     waitingLoginTimeoutSeconds: env.waitingLoginTimeoutSeconds

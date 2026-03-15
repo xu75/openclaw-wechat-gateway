@@ -83,3 +83,64 @@ export function mapSqliteConstraintError(error: unknown): Error {
 
   return error instanceof Error ? error : new Error(String(error));
 }
+
+function asNonEmptyStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+}
+
+export function isSqliteUniqueConstraintError(error: unknown): error is SqliteUniqueConstraintError {
+  if (error instanceof SqliteUniqueConstraintError) {
+    return true;
+  }
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  return (error as { code?: unknown }).code === 'REPO_UNIQUE_CONSTRAINT';
+}
+
+export function isPublishTaskIdempotencyUniqueConflict(error: unknown): boolean {
+  if (!isSqliteUniqueConstraintError(error)) {
+    return false;
+  }
+
+  const table = (error as { table?: unknown }).table;
+  const columns = asNonEmptyStrings((error as { columns?: unknown }).columns);
+  if (typeof table === 'string' && table === 'publish_tasks') {
+    return true;
+  }
+
+  return columns.includes('task_id') || columns.includes('idempotency_key');
+}
+
+export function buildIdempotencyConflictDetails(
+  error: unknown,
+  input?: {
+    task_id: string;
+    idempotency_key: string;
+  }
+): Record<string, unknown> {
+  const table =
+    error && typeof error === 'object' && typeof (error as { table?: unknown }).table === 'string'
+      ? ((error as { table?: string }).table ?? null)
+      : null;
+  const columns =
+    error && typeof error === 'object' ? asNonEmptyStrings((error as { columns?: unknown }).columns) : [];
+
+  const details: Record<string, unknown> = {
+    conflict_table: table,
+    conflict_columns: columns
+  };
+
+  if (input?.task_id) {
+    details.task_id = input.task_id;
+  }
+  if (input?.idempotency_key) {
+    details.idempotency_key = input.idempotency_key;
+  }
+
+  return details;
+}

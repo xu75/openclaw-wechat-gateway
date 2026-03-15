@@ -48,12 +48,15 @@ test('review token vector is reproducible and HS256 verifiable', () => {
     ttlSeconds: 600,
     taskId: 'task-123',
     idempotencyKey: 'idem-456',
+    title: 'Hello',
+    content: '<p>World</p>',
+    preferredChannel: 'browser',
     nowSeconds: 1700000000
   });
 
   assert.equal(
     token,
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJlY3MtcmV2aWV3Iiwic3ViIjoidGFzay0xMjMiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMDYwMCwicmV2aWV3X2FwcHJvdmVkIjp0cnVlLCJpZGVtcG90ZW5jeV9rZXkiOiJpZGVtLTQ1NiJ9.XXCxo7_F5j98ufaaoMzDJApAkFe_cWfuxLGKfdeS98w'
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJlY3MtcmV2aWV3IiwidGFza19pZCI6InRhc2stMTIzIiwiY29udGVudF9oYXNoIjoiNTBmNjAxMTNmYWNmYWRhNjUzOTAxOWNjM2Y3YjA2YTNlMDVmYzFkODAwYzk1MjA3Y2I4Nzc1OWQyMzU0OTY1MSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwNjAwLCJyZXZpZXdfYXBwcm92ZWQiOnRydWUsImlkZW1wb3RlbmN5X2tleSI6ImlkZW0tNDU2In0.x4_NIYEYGBzZLYesEOuAHhhApyb2ogg92qwFAbDyF3o'
   );
 
   const parts = token.split('.');

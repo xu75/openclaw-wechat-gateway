@@ -5,6 +5,10 @@ import {
   type ApiErrorCode
 } from '../errors/api-error-map.js';
 import { isApiErrorCode } from '../errors/api-error-map.js';
+import {
+  buildIdempotencyConflictDetails,
+  isPublishTaskIdempotencyUniqueConflict
+} from '../../repo/sqlite/errors.js';
 import { logError } from '../../observability/logger.js';
 
 type ErrorLike = {
@@ -56,6 +60,15 @@ function normalizeKnownError(err: unknown): AppError | null {
         typeof err.message === 'string' && err.message.trim() ? err.message : 'request failed';
       return new AppError(message, { code: mappedCode, status: err.status, details: err.details });
     }
+  }
+
+  if (isPublishTaskIdempotencyUniqueConflict(err)) {
+    const details = buildIdempotencyConflictDetails(err);
+    return new AppError('task_id/idempotency_key conflict', {
+      code: 'IDEMPOTENCY_CONFLICT',
+      status: 409,
+      details
+    });
   }
 
   return null;
