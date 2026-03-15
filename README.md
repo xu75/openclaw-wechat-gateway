@@ -57,7 +57,9 @@ npm run start:prod
 
 ## 文档
 
+- [正式使用说明（Agent + Gateway + OpenClaw Skill）](./docs/agent-gateway-openclaw-usage.md)
 - [API 合同](./docs/api-contract.md)
 - [值班 Runbook](./docs/runbook.md)
+- [OpenClaw Skill 说明](./docs/openclaw-wechat-markdown-publish-skill.md)
 - [架构蓝图](./ARCHITECTURE_BLUEPRINT.md)
 - [交接文档](./PROJECT_HANDOVER.md)
