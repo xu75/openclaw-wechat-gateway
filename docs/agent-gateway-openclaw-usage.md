@@ -18,6 +18,27 @@
 2. Gateway：内容处理、状态机、签名调用 Agent、审计与告警。
 3. Agent：执行 browser/official 发布动作，不做 markdown 解析。
 
+### 1.1 为什么拆分 Gateway 和 Agent
+
+1. 职责清晰：Gateway 是控制面（内容处理/状态机/审计），Agent 是执行面（发布动作）。
+2. 稳定性更好：内容策略和业务编排变更不会直接影响本地发布内核。
+3. 安全边界明确：OpenClaw 不直接接触 Agent 密钥和执行细节。
+4. 可维护性更高：可独立升级内容管线、签名策略、告警体系。
+5. 可扩展性更好：后续切换模型、样式、图片策略，优先改 Gateway 即可。
+
+### 1.2 部署模式说明
+
+推荐生产模式：
+
+1. OpenClaw + Agent 在本地机器。
+2. Gateway 在 ECS。
+3. 通过 FRP 暴露本地 Agent 给 ECS（`14273 -> 4273`）。
+
+也支持单机模式（开发/小规模使用）：
+
+1. OpenClaw、Gateway、Agent 全部在同一台机器。
+2. Gateway 直接连 `127.0.0.1:4273`，不需要 FRP。
+
 ## 2. 版本前置条件
 
 1. Node.js `>=18`
@@ -46,7 +67,9 @@ DB_PATH=./data/gateway.db
 
 说明：
 
-1. `AGENT_BASE_URL` 在 ECS 环境应指向 FRP 映射地址 `127.0.0.1:14273`。
+1. `AGENT_BASE_URL` 取决于部署模式：
+   - ECS Gateway：`http://127.0.0.1:14273`（FRP 映射）
+   - 单机 Gateway：`http://127.0.0.1:4273`（直连 Agent）
 2. `WECHAT_AGENT_SIGNING_SECRET` 必须与 Agent 校验端一致。
 3. `WAITING_LOGIN_TIMEOUT_SECONDS` 默认 `600`（10 分钟）。
 
@@ -58,6 +81,24 @@ DB_PATH=./data/gateway.db
 export OPENCLAW_WECHAT_GATEWAY_BASE_URL="http://127.0.0.1:3000"
 export OPENCLAW_WECHAT_REQUEST_ID_PREFIX="oc-mdpub"
 ```
+
+### 3.3 单机部署配置（OpenClaw 与 Agent 同机）
+
+当 OpenClaw 和 Agent 在同一台机器时，常见两种配置：
+
+1. Gateway 也同机（最简单）
+   - Gateway `.env`:
+     - `AGENT_BASE_URL=http://127.0.0.1:4273`
+   - OpenClaw Skill:
+     - `OPENCLAW_WECHAT_GATEWAY_BASE_URL=http://127.0.0.1:3000`
+   - 不需要 FRP。
+
+2. Gateway 在 ECS（当前推荐生产方案）
+   - Gateway `.env`:
+     - `AGENT_BASE_URL=http://127.0.0.1:14273`
+   - 需要 FRP：`ECS:14273 -> local:4273`
+   - OpenClaw Skill:
+     - `OPENCLAW_WECHAT_GATEWAY_BASE_URL=<你的ECS Gateway地址>`
 
 ## 4. Gateway 启动与校验
 
