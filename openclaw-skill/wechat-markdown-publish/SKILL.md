@@ -1,53 +1,81 @@
 ---
 name: publish_wechat
-description: Publish the current conversation's Markdown article to WeChat via the Gateway with the explicit command `/publish_wechat`, including `/publish_wechat status <task_id>` and `/publish_wechat confirm <task_id>` follow-ups in Feishu, Telegram, and other OpenClaw channels.
+description: Slash command handler for `/publish_wechat` only. Publish the current thread's Markdown article to WeChat when the user explicitly types `/publish_wechat` with no extra arguments.
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 metadata:
   { "openclaw": { "emoji": "📰", "requires": { "bins": ["bash", "curl", "jq"] } } }
 ---
 
 # publish_wechat
 
-Use this skill only when the user explicitly invokes the command:
+This skill is command-only.
+
+Allowed command:
 
 - `/publish_wechat`
-- `/publish_wechat status <task_id>`
-- `/publish_wechat confirm <task_id>`
 
-Do not auto-trigger on natural-language publish intent. This skill is command-only.
+Never auto-trigger from natural-language publish intent, and never handle status, confirm, or relogin here.
 
-## Global rules
+## Hard rules
 
 - Never convert Markdown to HTML in OpenClaw.
-- Always send the raw Markdown to the bundled script through stdin.
-- The script already sets:
-  - `content_format=markdown`
-  - `preferred_channel=browser`
-  - `x-request-id`
-- Do not poll `/wechat/publish` while a task is in `waiting_login`.
-- `confirm-login` is a single manual action. Never auto-retry it.
-- Do not inspect ECS, Gateway logs, browser service logs, or remote agent state unless the user explicitly asks for debugging.
-- If the Gateway returns browser startup or publish errors, report the returned `task_id`, `status`, `error.code`, and message, then stop.
-- Always return the script output verbatim unless you need to add one short lead-in sentence.
-- Never alter or wrap a trailing `MEDIA: ...` line from the script. OpenClaw uses it to send image attachments.
-- If the script output contains a trailing `MEDIA: ...` line, stop after returning that output. Never call `read`, `message`, image, attachment, or any fallback send tool for the same QR code.
+- Always send raw Markdown to the bundled script.
+- Never poll publish while a task is `waiting_login`.
+- Never auto-confirm a task.
+- Use the script output as the reply body unless one short lead-in sentence is necessary.
+- If the script output includes `login_qr_png_path: <absolute_png_path>`, send exactly one QR image with the `message` tool using that path.
+- Never send a second QR image for the same response.
+- Never rely on a trailing `MEDIA: ...` directive from this skill.
 
-## `/publish_wechat`
+## Current-turn parsing
 
-When the user sends `/publish_wechat` with no subcommand:
+OpenClaw usually rewrites slash commands into:
 
-1. Extract the raw Markdown from the current conversation.
-2. Prefer, in order:
-   - a fenced ```markdown block in the most recent article message in the thread
-   - the most recent non-command message that looks like the article body
-   - the most recent earlier non-command message that contains the Markdown document
-3. Preserve the content exactly. No Markdown cleanup, HTML conversion, image rewriting, or normalization.
-4. Derive a title:
+```text
+Use the "publish_wechat" skill for this request.
+
+User input:
+<raw args after /publish_wechat>
+```
+
+Parse only the current turn:
+
+1. If the current turn contains `User input:`, treat that value as `arg_text`.
+2. Otherwise, if the current turn itself contains `/publish_wechat ...`, parse only that line.
+3. Otherwise treat `arg_text` as empty.
+
+Never read `arg_text` from conversation history, quoted examples, earlier assistant replies, or documentation snippets.
+
+Only execute when the current turn proves explicit command invocation:
+
+1. It contains `Use the "publish_wechat" skill for this request.`, or
+2. It contains an explicit `/publish_wechat` command line.
+
+If neither condition is met, return the redirect block and stop.
+
+If `arg_text` is not empty, return the redirect block and stop. Only the empty-argument form may publish.
+
+## Publish flow
+
+Run this flow only when `arg_text` is empty.
+
+1. Extract the nearest publishable Markdown document from the current thread.
+2. Prefer:
+   - the most recent fenced `markdown` block
+   - otherwise the most recent non-command Markdown-looking message
+   - otherwise the nearest earlier non-command message that is the article body
+3. Preserve bytes exactly. Do not normalize Markdown.
+4. Derive title:
    - first `# Heading`
-   - otherwise the first non-empty line, trimmed
+   - otherwise first non-empty line
    - otherwise `Markdown Publish`
-5. Write the extracted Markdown to a temp file with a quoted heredoc so bytes stay unchanged.
+5. If no publishable Markdown body exists, return exactly:
+
+```text
+未找到可发布的 Markdown 正文。请先发送文章内容（Markdown），再发送 /publish_wechat。
+```
+
 6. Run:
 
 ```bash
@@ -59,64 +87,37 @@ EOF
 rm -f "$tmp_md"
 ```
 
-7. Return the script output exactly. If the result is `waiting_login`, make sure the reply clearly shows:
-   - `task_id`
-   - `status`
-   - `login_qr_mime`
-   - `login_qr_png_base64`
-   - `login_qr_png_path`
-   - `expires_at`
-   - the trailing `MEDIA: <absolute_png_path>` line unchanged so Feishu/Telegram can send the QR code as an image
-8. When the output already includes `MEDIA: <absolute_png_path>`, do not do anything else:
-   - do not inspect the PNG
-   - do not call `read`
-   - do not call `message`
-   - do not send a second QR image
-   - do not add a fallback image send
+7. Use the script output as the reply body.
 
-## `/publish_wechat confirm <task_id>`
+If result is `waiting_login`, make sure the reply contains:
 
-When the command starts with `/publish_wechat confirm `:
+- `task_id`
+- `status`
+- `login_qr_mime`
+- `login_qr_png_path`
+- `expires_at`
 
-1. Extract the task id after the command.
-2. If it is empty, ask the user to provide a task id.
-3. Run:
+If `login_qr_png_path` is present:
 
-```bash
-{baseDir}/scripts/wechat_publish_gateway.sh confirm-login "<task_id>"
-```
+- call `message` exactly once with that PNG path
+- do not send any second QR image
+- do not add `MEDIA: ...` to the final reply
+- do not inspect the PNG or create fallback image sends
 
-4. Return the script output exactly.
+## Redirect block
 
-## `/publish_wechat status <task_id>`
-
-When the command starts with `/publish_wechat status `:
-
-1. Extract the task id after the command.
-2. If it is empty, ask the user to provide a task id.
-3. Run:
-
-```bash
-{baseDir}/scripts/wechat_publish_gateway.sh status "<task_id>"
-```
-
-4. Return the script output exactly.
-
-## Invalid arguments
-
-If the command contains an unsupported subcommand, return this short usage block and do nothing else:
+If the user typed `/publish_wechat` with extra arguments, return exactly:
 
 ```text
-Usage:
 /publish_wechat
-/publish_wechat status <task_id>
-/publish_wechat confirm <task_id>
+/publish_wechat_status <task_id>
+/publish_wechat_confirm <task_id>
+/publish_wechat_relogin
 ```
 
 ## Response contract
 
-- Success and failure replies must include `task_id` and `status`.
-- For `waiting_login`, include QR-related fields and `expires_at`.
-- Preserve any `MEDIA: ...` directive line exactly as emitted by the script.
-- For `422 IMAGE_POLICY_VIOLATION`, keep `failed_images` and `replaced_count` exactly as returned.
-- For `409`, `422`, and `502`, keep the original `error.code` visible.
+- Publish replies must include `task_id` and `status`.
+- `waiting_login` replies must include QR fields and `expires_at`.
+- `422 IMAGE_POLICY_VIOLATION` must keep `failed_images` and `replaced_count`.
+- `409`, `422`, and `502` must keep the original `error.code`.

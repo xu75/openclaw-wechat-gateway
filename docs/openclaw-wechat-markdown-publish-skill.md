@@ -2,11 +2,14 @@
 
 This skill lets OpenClaw users send Markdown documents from chat channels such as Feishu and Telegram to the WeChat Gateway.
 
+Natural-language publish intent does not execute by default. Users must use explicit slash commands for execution.
+
 ## Command
 
 - `/publish_wechat`
-- `/publish_wechat status <task_id>`
-- `/publish_wechat confirm <task_id>`
+- `/publish_wechat_status <task_id>`
+- `/publish_wechat_confirm <task_id>`
+- `/publish_wechat_relogin`
 
 This skill is now command-first and does not rely on vague natural-language triggering.
 
@@ -21,12 +24,27 @@ This skill is now command-first and does not rely on vague natural-language trig
    - `task_id`
    - `status`
    - `login_qr_mime`
-   - `login_qr_png_base64`
    - `login_qr_png_path`
    - `expires_at`
-   - a trailing `MEDIA: <absolute_png_path>` directive that OpenClaw turns into a real QR image message in Feishu/Telegram
-5. After scanning the QR code, send `/publish_wechat confirm <task_id>`.
-6. Query any time with `/publish_wechat status <task_id>`.
+5. When `login_qr_png_path` is present, OpenClaw should send exactly one QR image using that path.
+6. After scanning the QR code, send `/publish_wechat_confirm <task_id>`.
+7. Query any time with `/publish_wechat_status <task_id>`.
+
+If the user only says things like “发到公众号” or “再发一遍 wechat”, OpenClaw should not publish directly. It should wait for explicit slash commands above.
+
+## Relogin Command
+
+Use relogin when agent/browser login state is stale and you need a fresh login session before publish:
+
+```text
+/publish_wechat_relogin
+```
+
+This command only triggers agent relogin.
+
+- It does not publish any article.
+- It does not auto-confirm any task.
+- If it returns `login_qr_png_path`, OpenClaw should send exactly one QR image using that path.
 
 ## Behavior Notes
 
@@ -48,6 +66,12 @@ This skill is now command-first and does not rely on vague natural-language trig
 
 ```bash
 /opt/openclaw/openclaw-patched/skills/wechat-markdown-publish/scripts/smoke_gateway_publish.sh
+```
+
+Relogin direct script example:
+
+```bash
+/opt/openclaw/openclaw-patched/skills/wechat-markdown-publish/scripts/wechat_publish_gateway.sh relogin --output json
 ```
 
 ## Environment Override

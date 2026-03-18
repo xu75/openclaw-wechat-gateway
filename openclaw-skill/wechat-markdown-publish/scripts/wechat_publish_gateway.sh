@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 BASE_URL="${OPENCLAW_WECHAT_GATEWAY_BASE_URL:-http://127.0.0.1:3000}"
+AGENT_BASE_URL="${OPENCLAW_WECHAT_AGENT_BASE_URL:-http://127.0.0.1:14273}"
 OUTPUT_FORMAT="text"
 REQUEST_ID_PREFIX="${OPENCLAW_WECHAT_REQUEST_ID_PREFIX:-oc-mdpub}"
 CONTEXT_ID=""
@@ -16,6 +17,7 @@ Usage:
   wechat_publish_gateway.sh publish --title "<title>" [--task-id "<task_id>"] [--idempotency-key "<key>"] [--context-id "<chat_id>"] [--gateway-base-url "<url>"] [--output text|json] < markdown.md
   wechat_publish_gateway.sh confirm-login <task_id> [--gateway-base-url "<url>"] [--output text|json]
   wechat_publish_gateway.sh status <task_id> [--gateway-base-url "<url>"] [--output text|json]
+  wechat_publish_gateway.sh relogin [--agent-base-url "<url>"] [--output text|json]
 EOF
 }
 
@@ -109,9 +111,20 @@ request_id() {
 }
 
 friendly_error_message() {
-  case "${1:-}" in
+  local error_code="${1:-}"
+  local operation="${2:-}"
+  local current_status="${3:-}"
+  local task_error_code="${4:-}"
+
+  case "$error_code" in
     STATUS_CONFLICT)
-      printf '%s' '当前任务状态不允许此操作，或 confirm-login 重试机会已经消耗。'
+      if [[ "$operation" == "confirm-login" && "$current_status" == "manual_intervention" ]]; then
+        printf '%s' '任务已进入 manual_intervention，当前 task 无法继续 confirm。请重新发送 /publish_wechat 新建任务。'
+      elif [[ "$operation" == "confirm-login" ]]; then
+        printf '%s' '当前任务状态不允许 confirm，或 confirm-login 重试机会已经消耗。'
+      else
+        printf '%s' '当前任务状态不允许此操作。'
+      fi
       ;;
     IDEMPOTENCY_CONFLICT)
       printf '%s' '任务标识发生冲突：相同 task_id 或 idempotency_key 已被占用。'
@@ -134,8 +147,54 @@ friendly_error_message() {
     INVALID_REQUEST)
       printf '%s' '请求参数不合法。'
       ;;
+    AGENT_BUSINESS_ERROR)
+      if [[ "$task_error_code" == "BROWSER_CONTENT_INJECTION_FAILED" ]]; then
+        printf '%s' '本次失败是编辑器注入失败，不是登录失败。请重新发送 /publish_wechat 新建任务重试。'
+      else
+        printf '%s' 'Gateway 与发布器交互返回业务错误，请重新发起发布。'
+      fi
+      ;;
     *)
       printf '%s' ''
+      ;;
+  esac
+}
+
+action_hint_message() {
+  local operation="${1:-}"
+  local current_status="${2:-}"
+  local error_code="${3:-}"
+  local task_error_code="${4:-}"
+
+  if [[ "$current_status" == "manual_intervention" && "$task_error_code" == "BROWSER_CONTENT_INJECTION_FAILED" ]]; then
+    printf '%s' '建议: 直接发送 /publish_wechat 新建任务重试；不要对当前 task 再执行 confirm。'
+    return
+  fi
+
+  if [[ "$current_status" == "manual_intervention" && "$task_error_code" == "WAITING_LOGIN_TIMEOUT" ]]; then
+    printf '%s' '建议: 先发送 /publish_wechat_relogin 获取新二维码，再发送 /publish_wechat。'
+    return
+  fi
+
+  case "$error_code" in
+    STATUS_CONFLICT)
+      if [[ "$operation" == "confirm-login" ]]; then
+        printf '%s' '建议: 对该 task 停止 confirm。若需继续发布，请发送 /publish_wechat 新建任务。'
+      fi
+      ;;
+    WAITING_LOGIN_TIMEOUT)
+      printf '%s' '建议: 发送 /publish_wechat_relogin 获取新二维码，然后重新 /publish_wechat。'
+      ;;
+    AGENT_SIGNATURE_ERROR)
+      printf '%s' '建议: 检查 Gateway 与 Agent 的签名密钥配置是否一致。'
+      ;;
+    AGENT_UNAVAILABLE)
+      printf '%s' '建议: 先检查 Agent/MCP 与 FRP 连通性，再重试 /publish_wechat。'
+      ;;
+    AGENT_BUSINESS_ERROR)
+      if [[ "$task_error_code" != "BROWSER_CONTENT_INJECTION_FAILED" ]]; then
+        printf '%s' '建议: 重新发送 /publish_wechat 新建任务；若持续失败，再排查 Gateway 到 Agent 的 MCP 会话。'
+      fi
       ;;
   esac
 }
@@ -166,6 +225,12 @@ format_success_text() {
   local expires_at
   expires_at="$(jq -r '.login_session_expires_at // .expires_at // empty' <<<"$task_json")"
   local login_qr_png_path=''
+  local suppress_base64_text='false'
+
+  # In text mode, always prefer image attachment delivery via MEDIA and avoid base64 blocks.
+  if [[ "$OUTPUT_FORMAT" == "text" ]]; then
+    suppress_base64_text='true'
+  fi
 
   cat <<EOF
 操作: ${operation}
@@ -187,11 +252,19 @@ EOF
   if [[ "$status" == "waiting_login" ]]; then
     printf 'login_qr_mime: %s\n' "${login_qr_mime:-}"
     printf 'expires_at: %s\n' "${expires_at:-}"
-    printf 'login_qr_png_base64:\n'
-    printf '```text\n%s\n```\n' "${login_qr_png_base64:-}"
+    if [[ "$suppress_base64_text" != "true" ]]; then
+      printf 'login_qr_png_base64:\n'
+      printf '```text\n%s\n```\n' "${login_qr_png_base64:-}"
+    fi
     if login_qr_png_path="$(materialize_login_qr_png "$task_id_value" "$login_qr_png_base64" 2>/dev/null)"; then
       printf 'login_qr_png_path: %s\n' "$login_qr_png_path"
-      printf 'MEDIA: %s\n' "$login_qr_png_path"
+    fi
+  fi
+  if [[ "$status" == "manual_intervention" ]]; then
+    local manual_hint
+    manual_hint="$(action_hint_message "$operation" "$status" "$error_code" "$error_code")"
+    if [[ -n "$manual_hint" ]]; then
+      printf 'action_hint: %s\n' "$manual_hint"
     fi
   fi
 }
@@ -203,13 +276,21 @@ format_error_text() {
   local task_id_value="$4"
   local current_status="$5"
   local error_json="$6"
+  local current_task_json="${7:-}"
 
   local error_code
   error_code="$(jq -r '.code // "INTERNAL_ERROR"' <<<"$error_json")"
   local raw_message
   raw_message="$(jq -r '.message // "request failed"' <<<"$error_json")"
+  local task_error_code=''
+  if [[ -n "$current_task_json" && "$current_task_json" != "null" ]]; then
+    task_error_code="$(jq -r '.error_code // empty' <<<"$current_task_json")"
+  fi
+  if [[ -z "$task_error_code" ]]; then
+    task_error_code="$(jq -r '.details.task.error_code // empty' <<<"$error_json")"
+  fi
   local friendly
-  friendly="$(friendly_error_message "$error_code")"
+  friendly="$(friendly_error_message "$error_code" "$operation" "$current_status" "$task_error_code")"
   local details
   details="$(jq -c '.details // null' <<<"$error_json")"
 
@@ -225,6 +306,15 @@ EOF
 
   if [[ "$friendly" != "$raw_message" && -n "$raw_message" ]]; then
     printf 'raw_message: %s\n' "$raw_message"
+  fi
+  if [[ -n "$task_error_code" ]]; then
+    printf 'task.error_code: %s\n' "$task_error_code"
+  fi
+
+  local action_hint
+  action_hint="$(action_hint_message "$operation" "$current_status" "$error_code" "$task_error_code")"
+  if [[ -n "$action_hint" ]]; then
+    printf 'action_hint: %s\n' "$action_hint"
   fi
 
   if [[ "$error_code" == "IMAGE_POLICY_VIOLATION" ]]; then
@@ -404,13 +494,329 @@ emit_result() {
       --argjson http_status "$http_status" \
       --arg task_id "$requested_task_id" \
       --arg status "$current_status" \
-      --arg user_message "$(format_error_text "$operation" "$request_id_value" "$gateway_request_id" "$requested_task_id" "$current_status" "$error_json")" \
+      --arg user_message "$(format_error_text "$operation" "$request_id_value" "$gateway_request_id" "$requested_task_id" "$current_status" "$error_json" "$current_task_json")" \
       --argjson error "$error_json" \
       --argjson task "$(if [[ -n "$current_task_json" ]]; then printf '%s' "$current_task_json"; else printf '%s' 'null'; fi)" \
       '{ok:false,operation:$operation,request_id:$request_id,gateway_request_id:$gateway_request_id,http_status:$http_status,task_id:$task_id,status:$status,user_message:$user_message,error:$error,task:$task}'
   else
-    format_error_text "$operation" "$request_id_value" "$gateway_request_id" "$requested_task_id" "$current_status" "$error_json"
+    format_error_text "$operation" "$request_id_value" "$gateway_request_id" "$requested_task_id" "$current_status" "$error_json" "$current_task_json"
   fi
+}
+
+mcp_extract_payload_json() {
+  local raw_body="$1"
+  local candidate=''
+
+  candidate="$(printf '%s\n' "$raw_body" | sed -n 's/^data:[[:space:]]*//p' | awk 'NF && $0 != "[DONE]" {line=$0} END{print line}')"
+  if [[ -n "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  printf '%s' "$raw_body"
+}
+
+mcp_post() {
+  local payload="$1"
+  local mcp_session_id="${2:-}"
+  local url="${AGENT_BASE_URL%/}/mcp"
+  local headers_file body_out http_status content_type raw_body payload_json is_json response_session_id
+
+  headers_file="$(mktemp)"
+  body_out="$(mktemp)"
+
+  if [[ -n "$mcp_session_id" ]]; then
+    http_status="$(curl -sS -X POST "$url" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json, text/event-stream' \
+      -H "mcp-session-id: ${mcp_session_id}" \
+      --data-binary "$payload" \
+      -D "$headers_file" \
+      -o "$body_out" \
+      -w '%{http_code}')"
+  else
+    http_status="$(curl -sS -X POST "$url" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json, text/event-stream' \
+      --data-binary "$payload" \
+      -D "$headers_file" \
+      -o "$body_out" \
+      -w '%{http_code}')"
+  fi
+
+  content_type="$(awk 'BEGIN{IGNORECASE=1} /^content-type:/ {$1=""; sub(/^[[:space:]]*/,"",$0); gsub("\r","",$0); print; exit}' "$headers_file")"
+  response_session_id="$(awk 'BEGIN{IGNORECASE=1} /^mcp-session-id:/ {gsub("\r","",$2); print $2; exit}' "$headers_file")"
+  raw_body="$(cat "$body_out")"
+  payload_json="$(mcp_extract_payload_json "$raw_body")"
+
+  if [[ -n "$payload_json" ]] && jq -e . >/dev/null 2>&1 <<<"$payload_json"; then
+    is_json=true
+  else
+    is_json=false
+  fi
+
+  rm -f "$headers_file" "$body_out"
+
+  emit_json \
+    --argjson http_status "${http_status}" \
+    --arg content_type "$content_type" \
+    --arg mcp_session_id "${response_session_id:-}" \
+    --arg raw_body "$raw_body" \
+    --arg payload_json "$payload_json" \
+    --argjson is_json "$is_json" \
+    '{http_status:$http_status,content_type:$content_type,mcp_session_id:$mcp_session_id,raw_body:$raw_body,payload_json:$payload_json,is_json:$is_json}'
+}
+
+emit_relogin_success() {
+  local request_id_value="$1"
+  local status_value="$2"
+  local message_value="$3"
+  local result_json="$4"
+  local data_url_regex='^data:([^;]+);base64,(.+)$'
+
+  if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+    local qr_data qr_mime expires_at qr_base64 qr_png_path
+    qr_data="$(jq -r '.structuredContent.qr.data // .structuredContent.session.qr.data // empty' <<<"$result_json")"
+    qr_mime="$(jq -r '.structuredContent.qr.format // .structuredContent.session.qr.format // empty' <<<"$result_json")"
+    expires_at="$(jq -r '.structuredContent.session.expires_at // .structuredContent.qr.expires_at // empty' <<<"$result_json")"
+    qr_base64=''
+    qr_png_path=''
+
+    if [[ "$qr_data" =~ $data_url_regex ]]; then
+      qr_mime="${BASH_REMATCH[1]}"
+      qr_base64="${BASH_REMATCH[2]}"
+      qr_png_path="$(materialize_login_qr_png "relogin-${request_id_value}" "$qr_base64" 2>/dev/null || true)"
+    fi
+
+    emit_json \
+      --arg operation "relogin" \
+      --arg request_id "$request_id_value" \
+      --arg status "$status_value" \
+      --arg message "$message_value" \
+      --arg login_qr_mime "$qr_mime" \
+      --arg login_session_expires_at "$expires_at" \
+      --arg login_qr_png_base64 "$qr_base64" \
+      --arg qr_png_path "$qr_png_path" \
+      --argjson result "$result_json" \
+      '{ok:true,operation:$operation,request_id:$request_id,status:$status,message:$message,login_qr_mime:($login_qr_mime|select(length>0)),login_session_expires_at:($login_session_expires_at|select(length>0)),login_qr_png_base64:($login_qr_png_base64|select(length>0)),qr_png_path:($qr_png_path|select(length>0)),result:$result}'
+  else
+    local qr_data qr_mime expires_at qr_base64 qr_png_path
+    local suppress_base64_text='false'
+    qr_data="$(jq -r '.structuredContent.qr.data // .structuredContent.session.qr.data // empty' <<<"$result_json")"
+    qr_mime="$(jq -r '.structuredContent.qr.format // .structuredContent.session.qr.format // empty' <<<"$result_json")"
+    expires_at="$(jq -r '.structuredContent.session.expires_at // .structuredContent.qr.expires_at // empty' <<<"$result_json")"
+    qr_base64=''
+    qr_png_path=''
+
+    # In text mode, always prefer single MEDIA image delivery and avoid base64 blocks.
+    if [[ "$OUTPUT_FORMAT" == "text" ]]; then
+      suppress_base64_text='true'
+    fi
+
+    if [[ "$qr_data" =~ $data_url_regex ]]; then
+      qr_mime="${BASH_REMATCH[1]}"
+      qr_base64="${BASH_REMATCH[2]}"
+      qr_png_path="$(materialize_login_qr_png "relogin-${request_id_value}" "$qr_base64" 2>/dev/null || true)"
+    fi
+
+    cat <<EOF
+operation: relogin
+request_id: ${request_id_value}
+status: ${status_value}
+message: ${message_value}
+EOF
+    if [[ "$status_value" == "waiting_login" ]]; then
+      printf 'login_qr_mime: %s\n' "${qr_mime:-}"
+      printf 'expires_at: %s\n' "${expires_at:-}"
+      if [[ "$suppress_base64_text" != "true" ]]; then
+        printf 'login_qr_png_base64:\n'
+        printf '```text\n%s\n```\n' "${qr_base64:-}"
+      fi
+      if [[ -n "$qr_png_path" ]]; then
+        printf 'login_qr_png_path: %s\n' "$qr_png_path"
+      fi
+    fi
+  fi
+}
+
+emit_relogin_error() {
+  local request_id_value="$1"
+  local status_value="$2"
+  local message_value="$3"
+  local error_code="$4"
+  local error_message="$5"
+  local details_json="${6:-null}"
+
+  if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+    emit_json \
+      --arg operation "relogin" \
+      --arg request_id "$request_id_value" \
+      --arg status "$status_value" \
+      --arg message "$message_value" \
+      --arg error_code "$error_code" \
+      --arg error_message "$error_message" \
+      --argjson details "$details_json" \
+      '{ok:false,operation:$operation,request_id:$request_id,status:$status,message:$message,error:{code:$error_code,message:$error_message},details:$details}'
+  else
+    cat <<EOF
+operation: relogin
+request_id: ${request_id_value}
+status: ${status_value}
+message: ${message_value}
+error.code: ${error_code}
+error.message: ${error_message}
+EOF
+    if [[ "$details_json" != "null" ]]; then
+      printf 'details:\n'
+      printf '```json\n%s\n```\n' "$details_json"
+    fi
+  fi
+}
+
+relogin_flow() {
+  local request_id_value init_payload notify_payload call_payload mcp_session_id
+  local init_response notify_response call_response
+  local init_json notify_json call_json
+  local call_result_json status_value message_value
+
+  request_id_value="$(request_id relogin)"
+
+  init_payload="$(jq -cn \
+    --arg id "${request_id_value}-initialize" \
+    '{jsonrpc:"2.0",id:$id,method:"initialize",params:{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"wechat_publish_gateway",version:"1.0.0"}}}')"
+  if ! init_response="$(mcp_post "$init_payload" 2>/dev/null)"; then
+    emit_relogin_error "$request_id_value" "failed" "Agent relogin initialize request failed." "MCP_REQUEST_FAILED" "failed to call initialize"
+    return 0
+  fi
+  if ! jq -e '.http_status >= 200 and .http_status < 300' >/dev/null 2>&1 <<<"$init_response"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin initialize request failed." \
+      "MCP_HTTP_$(jq -r '.http_status' <<<"$init_response")" \
+      "initialize returned non-2xx status" \
+      "$(jq -c '{stage:"initialize",http_status,content_type,raw_body}' <<<"$init_response")"
+    return 0
+  fi
+  if ! jq -e '.is_json == true' >/dev/null 2>&1 <<<"$init_response"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin initialize response is not JSON." \
+      "MCP_BAD_RESPONSE" \
+      "initialize returned non-JSON payload" \
+      "$(jq -c '{stage:"initialize",http_status,content_type,raw_body}' <<<"$init_response")"
+    return 0
+  fi
+  init_json="$(jq -r '.payload_json' <<<"$init_response")"
+  if jq -e '.error != null' >/dev/null 2>&1 <<<"$init_json"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin initialize returned error." \
+      "$(jq -r '.error.code // "MCP_INITIALIZE_ERROR" | tostring' <<<"$init_json")" \
+      "$(jq -r '.error.message // "initialize failed"' <<<"$init_json")" \
+      "$(jq -c . <<<"$init_json")"
+    return 0
+  fi
+
+  mcp_session_id="$(jq -r '.mcp_session_id // empty' <<<"$init_response")"
+  if [[ -z "$mcp_session_id" ]]; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin initialize did not return a session." \
+      "MCP_SESSION_MISSING" \
+      "initialize response missing mcp-session-id header" \
+      "$(jq -c '{stage:"initialize",http_status,content_type,mcp_session_id,raw_body}' <<<"$init_response")"
+    return 0
+  fi
+
+  notify_payload='{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+  if ! notify_response="$(mcp_post "$notify_payload" "$mcp_session_id" 2>/dev/null)"; then
+    emit_relogin_error "$request_id_value" "failed" "Agent initialized notification failed." "MCP_REQUEST_FAILED" "failed to send notifications/initialized"
+    return 0
+  fi
+  if ! jq -e '.http_status >= 200 and .http_status < 300' >/dev/null 2>&1 <<<"$notify_response"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent initialized notification failed." \
+      "MCP_HTTP_$(jq -r '.http_status' <<<"$notify_response")" \
+      "notifications/initialized returned non-2xx status" \
+      "$(jq -c '{stage:"notifications/initialized",http_status,content_type,raw_body}' <<<"$notify_response")"
+    return 0
+  fi
+  if jq -e '.is_json == true' >/dev/null 2>&1 <<<"$notify_response"; then
+    notify_json="$(jq -r '.payload_json' <<<"$notify_response")"
+    if jq -e '.error != null' >/dev/null 2>&1 <<<"$notify_json"; then
+      emit_relogin_error \
+        "$request_id_value" \
+        "failed" \
+        "Agent initialized notification returned error." \
+        "$(jq -r '.error.code // "MCP_INITIALIZED_ERROR" | tostring' <<<"$notify_json")" \
+        "$(jq -r '.error.message // "notifications/initialized failed"' <<<"$notify_json")" \
+        "$(jq -c . <<<"$notify_json")"
+      return 0
+    fi
+  fi
+
+  call_payload="$(jq -cn \
+    --arg id "${request_id_value}-tools-call" \
+    '{jsonrpc:"2.0",id:$id,method:"tools/call",params:{name:"publisher_relogin",arguments:{}}}')"
+  if ! call_response="$(mcp_post "$call_payload" "$mcp_session_id" 2>/dev/null)"; then
+    emit_relogin_error "$request_id_value" "failed" "Agent relogin tool call failed." "MCP_REQUEST_FAILED" "failed to call tools/call"
+    return 0
+  fi
+  if ! jq -e '.http_status >= 200 and .http_status < 300' >/dev/null 2>&1 <<<"$call_response"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin tool call failed." \
+      "MCP_HTTP_$(jq -r '.http_status' <<<"$call_response")" \
+      "tools/call returned non-2xx status" \
+      "$(jq -c '{stage:"tools/call",http_status,content_type,raw_body}' <<<"$call_response")"
+    return 0
+  fi
+  if ! jq -e '.is_json == true' >/dev/null 2>&1 <<<"$call_response"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin tool response is not JSON." \
+      "MCP_BAD_RESPONSE" \
+      "tools/call returned non-JSON payload" \
+      "$(jq -c '{stage:"tools/call",http_status,content_type,raw_body}' <<<"$call_response")"
+    return 0
+  fi
+
+  call_json="$(jq -r '.payload_json' <<<"$call_response")"
+  if jq -e '.error != null' >/dev/null 2>&1 <<<"$call_json"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin returned MCP error." \
+      "$(jq -r '.error.code // "MCP_TOOL_ERROR" | tostring' <<<"$call_json")" \
+      "$(jq -r '.error.message // "tools/call failed"' <<<"$call_json")" \
+      "$(jq -c . <<<"$call_json")"
+    return 0
+  fi
+
+  call_result_json="$(jq -c '.result // {}' <<<"$call_json")"
+  if jq -e '.isError == true' >/dev/null 2>&1 <<<"$call_result_json"; then
+    emit_relogin_error \
+      "$request_id_value" \
+      "failed" \
+      "Agent relogin tool reported an error." \
+      "$(jq -r '.error.code // "MCP_TOOL_ERROR" | tostring' <<<"$call_result_json")" \
+      "$(jq -r '.error.message // (.content[]? | select(.type=="text") | .text) // "publisher_relogin failed"' <<<"$call_result_json")" \
+      "$call_result_json"
+    return 0
+  fi
+
+  status_value="$(jq -r '.structuredContent.status // .status // "ok"' <<<"$call_result_json")"
+  message_value="$(jq -r '.structuredContent.message // .message // (.content[]? | select(.type=="text") | .text) // "publisher_relogin triggered"' <<<"$call_result_json")"
+
+  emit_relogin_success "$request_id_value" "$status_value" "$message_value" "$call_result_json"
 }
 
 shift || true
@@ -419,6 +825,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --gateway-base-url)
       BASE_URL="${2:-}"
+      shift 2
+      ;;
+    --agent-base-url)
+      AGENT_BASE_URL="${2:-}"
       shift 2
       ;;
     --output)
@@ -473,6 +883,9 @@ case "$SUBCOMMAND" in
       exit 2
     fi
     status_flow "$1"
+    ;;
+  relogin)
+    relogin_flow
     ;;
   *)
     usage >&2
