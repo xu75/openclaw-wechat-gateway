@@ -30,8 +30,8 @@
 
 推荐生产模式：
 
-1. OpenClaw + Agent 在本地机器。
-2. Gateway 在 ECS。
+1. Agent 在本地机器。（这样微信后台看到的操作都是在日常电脑上做的）
+2. Openclaw + Gateway 在 ECS 或其他小龙虾机器上。
 3. 通过 FRP 暴露本地 Agent 给 ECS（`14273 -> 4273`）。
 
 也支持单机模式（开发/小规模使用）：
