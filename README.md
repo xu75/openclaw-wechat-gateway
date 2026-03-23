@@ -1,8 +1,11 @@
 # openclaw-wechat-gateway
 
 Openclaw 到本地 `wechat-publisher-agent` 的发布总控网关（V1）。和https://github.com/xu75/wechat-unofficial-publisher-agent 配套使用。
+因为是自己用的，安装说明不是很清楚，建议用codex帮你分析后安装。欢迎对安装说明进行更新完善。
 
-##功能示例
+## 功能示例
+在openclaw里面，配合wechat-notes-style生成文章，直接用/publish_wechat发布到自己公众号，如果Agent没有登录，则会返回登录二维码，扫码登录后继续执行就可以了。如果已经登录但是想换另一个账号，或者未登录状态，可用/publish_wechat_relogin来登录。
+
 ![20260323-222708](https://github.com/user-attachments/assets/0c0ddc39-9647-4064-ad57-a85f830b49bc)
 
 ## V1 能力
