@@ -1,6 +1,6 @@
 # openclaw-wechat-gateway
 
-Openclaw 到本地 `wechat-publisher-agent` 的发布总控网关（V1）。
+Openclaw 到本地 `wechat-publisher-agent` 的发布总控网关（V1）。和https://github.com/xu75/wechat-unofficial-publisher-agent配套使用。
 
 ## V1 能力
 
