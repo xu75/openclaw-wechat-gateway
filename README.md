@@ -2,6 +2,9 @@
 
 Openclaw 到本地 `wechat-publisher-agent` 的发布总控网关（V1）。和https://github.com/xu75/wechat-unofficial-publisher-agent 配套使用。
 
+##功能示例
+![20260323-222708](https://github.com/user-attachments/assets/0c0ddc39-9647-4064-ad57-a85f830b49bc)
+
 ## V1 能力
 
 1. 固定三条 API：
