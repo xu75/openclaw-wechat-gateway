@@ -11,7 +11,7 @@ export interface AgentPublishRequest {
 export interface AgentAcceptedResponse {
   status: 'accepted';
   channel: 'browser' | 'official';
-  publish_url: string;
+  publish_url?: string;
   task_id: string;
   idempotency_key: string;
 }
@@ -79,21 +79,26 @@ function asChannel(value: unknown): 'browser' | 'official' | null {
 
 function parseAccepted(value: Record<string, unknown>): AgentAcceptedResponse {
   const channel = asChannel(value.channel);
-  const publishUrl = asString(value.publish_url);
+  const publishUrl = asOptionalString(value.publish_url);
   const taskId = asString(value.task_id);
   const idempotencyKey = asString(value.idempotency_key);
 
-  if (!channel || !publishUrl || !taskId || !idempotencyKey) {
+  if (!channel || !taskId || !idempotencyKey) {
     throw new TypeError('invalid accepted response');
   }
 
-  return {
+  const result: AgentAcceptedResponse = {
     status: 'accepted',
     channel,
-    publish_url: publishUrl,
     task_id: taskId,
     idempotency_key: idempotencyKey
   };
+
+  if (publishUrl !== undefined) {
+    result.publish_url = publishUrl;
+  }
+
+  return result;
 }
 
 function parseWaitingLogin(value: Record<string, unknown>): AgentWaitingLoginResponse {

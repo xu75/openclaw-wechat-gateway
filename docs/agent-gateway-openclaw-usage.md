@@ -15,7 +15,7 @@
 职责边界：
 
 1. OpenClaw：接收用户命令与 markdown，调用 Gateway。
-2. Gateway：内容处理、状态机、签名调用 Agent、审计与告警。
+2. Gateway：内容处理、状态机、调用 Agent MCP tools、审计与告警。
 3. Agent：执行 browser/official 发布动作，不做 markdown 解析。
 
 ### 1.1 为什么拆分 Gateway 和 Agent
@@ -45,7 +45,7 @@
 2. Gateway 仓库依赖已安装：`npm install`
 3. Agent 已运行且本机可访问 `http://127.0.0.1:4273/health`
 4. ECS 到本地 Agent 的 FRP 映射可用：`http://127.0.0.1:14273/health`
-5. Gateway 与 Agent 使用同一套签名密钥
+5. Gateway 可访问 Agent 的 MCP 入口（默认 `${AGENT_BASE_URL}/mcp`）
 
 ## 3. 环境变量
 
@@ -70,7 +70,8 @@ DB_PATH=./data/gateway.db
 1. `AGENT_BASE_URL` 取决于部署模式：
    - ECS Gateway：`http://127.0.0.1:14273`（FRP 映射）
    - 单机 Gateway：`http://127.0.0.1:4273`（直连 Agent）
-2. `WECHAT_AGENT_SIGNING_SECRET` 必须与 Agent 校验端一致。
+   - Gateway 会自动使用 `${AGENT_BASE_URL}/mcp` 作为 MCP 主入口
+2. `WECHAT_AGENT_SIGNING_SECRET` 当前在 MCP 链路中不参与请求签名，但网关启动仍要求该变量非空（兼容保留项）。
 3. `WAITING_LOGIN_TIMEOUT_SECONDS` 默认 `600`（10 分钟）。
 
 ### 3.2 OpenClaw Skill（可选覆盖）
@@ -133,8 +134,9 @@ curl -sS http://127.0.0.1:3000/health
 `publish_wechat` 命令集：
 
 1. `/publish_wechat`
-2. `/publish_wechat status <task_id>`
-3. `/publish_wechat confirm <task_id>`
+2. `/publish_wechat_status <task_id>`
+3. `/publish_wechat_confirm <task_id>`
+4. `/publish_wechat_relogin`
 
 关键行为（固定）：
 
@@ -142,6 +144,8 @@ curl -sS http://127.0.0.1:3000/health
 2. Skill 始终传 `content_format=markdown`、`preferred_channel=browser`。
 3. `waiting_login` 只走查询和人工确认，不自动轮询 publish。
 4. `confirm-login` 只手动触发一次，不自动重试。
+5. 只有显式 `/publish_wechat` / `/publish_wechat_status` / `/publish_wechat_confirm` / `/publish_wechat_relogin` 命令才允许执行发布相关动作。
+6. 自然语言里的“发到公众号 / 再发一遍 wechat”不会直接发布，只有显式 slash 命令才会执行。
 
 ## 6. 端到端发布流程
 
@@ -154,7 +158,12 @@ curl -sS http://127.0.0.1:3000/health
 
 1. 执行 `Markdown -> HTML -> sanitize -> image rewrite`。
 2. 非法图片 URL（相对路径 / http / data / file）直接返回 `422 IMAGE_POLICY_VIOLATION`。
-3. 合法内容调用 Agent `/publish`（带 HMAC 签名与 review token）。
+3. 合法内容调用 Agent Remote MCP（`/mcp`）：
+   - `publisher_health`
+   - `publisher_login_status`
+   - 需要登录时 `publisher_login_qr_get`
+   - `publisher_publish`
+4. 发布成功判定条件：`status=accepted` 且 `execution.draft_saved=true`（表示已保存草稿，不代表已发表）。
 
 ### 6.3 Agent 返回分支
 
@@ -167,7 +176,7 @@ curl -sS http://127.0.0.1:3000/health
 在 OpenClaw 执行：
 
 ```text
-/publish_wechat confirm <task_id>
+/publish_wechat_confirm <task_id>
 ```
 
 Gateway 仅单次重试发布；重复确认会返回 `409 STATUS_CONFLICT`。
@@ -175,7 +184,7 @@ Gateway 仅单次重试发布；重复确认会返回 `409 STATUS_CONFLICT`。
 ### 6.5 查询状态
 
 ```text
-/publish_wechat status <task_id>
+/publish_wechat_status <task_id>
 ```
 
 如果 `waiting_login` 已过期，查询时会自动转 `manual_intervention`，不会触发 publish 轮询。
@@ -230,7 +239,7 @@ curl -sS 'http://127.0.0.1:3000/wechat/publish/task-demo-1' \
 4. `npm run db:migrate` 成功。
 5. `GET /health` 正常。
 6. 用 `scripts/smoke-curl.sh` 完成一次联调。
-7. OpenClaw 内完成一次 `/publish_wechat -> waiting_login -> confirm -> status` 全链路演练。
+7. OpenClaw 内完成一次 `/publish_wechat -> waiting_login -> /publish_wechat_confirm -> /publish_wechat_status` 全链路演练。
 
 ## 10. 运维与排障入口
 

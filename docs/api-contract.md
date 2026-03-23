@@ -49,11 +49,17 @@ interface ApiSuccess<PublishTaskView> {
 1. Validate request and apply idempotency checks.
 2. Run content pipeline in gateway: markdown/html normalize -> sanitize -> image policy rewrite.
 3. Strict image policy: if `failed_images` is non-empty, request fails immediately with `422 IMAGE_POLICY_VIOLATION`.
-4. On `IMAGE_POLICY_VIOLATION`, gateway must not call agent `/publish`.
+4. On `IMAGE_POLICY_VIOLATION`, gateway must not call agent MCP tools.
 5. Error `details` includes `failed_images` and `replaced_count`.
-6. Send signed `/publish` request to agent.
-7. Transition task state and append event/audit logs.
-8. Return task view.
+6. Gateway uses Remote MCP (`/mcp`) and reads tool `structuredContent` only.
+7. Gateway publish flow:
+   - `publisher_health`
+   - `publisher_login_status`
+   - if needed `publisher_login_qr_get`
+   - `publisher_publish`
+8. Publish success condition is `status=accepted` and `execution.draft_saved=true`.
+9. Transition task state and append event/audit logs.
+10. Return task view.
 
 ## 2) POST /wechat/publish/:task_id/confirm-login
 

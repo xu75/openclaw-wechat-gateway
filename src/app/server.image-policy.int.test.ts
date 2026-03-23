@@ -16,19 +16,11 @@ test('strict image policy: relative/http/data/file image URLs return 422 and do 
 
   let agentCallCount = 0;
   const agent = createHttpServer(async (req, res) => {
-    if (req.method === 'POST' && req.url === '/publish') {
+    if (req.method === 'POST' && req.url === '/mcp') {
       agentCallCount += 1;
       res.statusCode = 200;
       res.setHeader('content-type', 'application/json');
-      res.end(
-        JSON.stringify({
-          status: 'accepted',
-          channel: 'browser',
-          publish_url: 'https://mp.weixin.qq.com/mock',
-          task_id: 'unexpected-agent-call',
-          idempotency_key: 'unexpected-agent-call'
-        })
-      );
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }));
       return;
     }
 

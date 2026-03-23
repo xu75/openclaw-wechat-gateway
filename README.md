@@ -14,10 +14,15 @@ Openclaw 到本地 `wechat-publisher-agent` 的发布总控网关（V1）。
 - HTML sanitize
 - 图片 URL 规则校验与重写（仅允许绝对 HTTPS）
 
-3. Agent 调用安全：
-- 默认 Agent 地址 `http://127.0.0.1:14273`
-- `/publish` 请求强制 HMAC 签名（`X-Timestamp` / `X-Signature`）
-- 签名串：`METHOD + "\\n" + PATH + "\\n" + TIMESTAMP + "\\n" + BODY_SHA256`
+3. Agent 对接方式（Remote MCP）：
+- 默认 Agent 地址 `http://127.0.0.1:14273`（自动走 `/mcp`）
+- 工具调用固定使用 `structuredContent` 解析
+- 当前使用工具：
+  - `publisher_health`
+  - `publisher_login_status`
+  - `publisher_login_qr_get`
+  - `publisher_publish`
+- 发布成功判定：`status=accepted` 且 `execution.draft_saved=true`
 
 4. 状态机与登录约束：
 - `waiting_login` 不轮询 publish

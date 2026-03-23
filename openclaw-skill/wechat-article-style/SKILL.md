@@ -1,7 +1,7 @@
 ---
 name: wechat-article-style
 description: 微信公众号文章写作规范，包含标题、排版、结构、图片等标准。
-user-invocable: true
+user-invocable: false
 metadata:
   openclaw:
     emoji: "📝"

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer as createHttpServer } from 'node:http';
 import fs from 'node:fs';
@@ -9,12 +9,8 @@ import test from 'node:test';
 import type { AddressInfo } from 'node:net';
 import type { Server as HttpServer } from 'node:http';
 
-function sha256Hex(input: string): string {
-  return createHash('sha256').update(input, 'utf8').digest('hex');
-}
-
-function hmacSha256Hex(secret: string, input: string): string {
-  return createHmac('sha256', secret).update(input, 'utf8').digest('hex');
+function nowIso(): string {
+  return new Date().toISOString();
 }
 
 test('smoke: publish -> waiting_login -> confirm-login -> published', async () => {
@@ -25,11 +21,13 @@ test('smoke: publish -> waiting_login -> confirm-login -> published', async () =
   const dbPath = path.join(tempDir, 'gateway.db');
   let gateway: HttpServer | null = null;
 
-  const agentCalls: Array<{ task_id: string; content: string }> = [];
-  const agentCallCounter = new Map<string, number>();
+  const mcpSessionId = 'mcp-session-smoke';
+  const toolCalls: string[] = [];
+  const publishCalls: Array<{ title: string; content_html: string }> = [];
+  let loggedIn = false;
 
   const agent = createHttpServer(async (req, res) => {
-    if (req.method !== 'POST' || req.url !== '/publish') {
+    if (req.method !== 'POST' || req.url !== '/mcp') {
       res.statusCode = 404;
       res.end();
       return;
@@ -39,58 +37,224 @@ test('smoke: publish -> waiting_login -> confirm-login -> published', async () =
     for await (const chunk of req) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     }
-    const body = Buffer.concat(chunks).toString('utf8');
-
-    const timestamp = req.headers['x-timestamp'];
-    const signature = req.headers['x-signature'];
-    assert.equal(typeof timestamp, 'string');
-    assert.equal(typeof signature, 'string');
-
-    const bodySha = sha256Hex(body);
-    const signingText = `POST\n/publish\n${timestamp}\n${bodySha}`;
-    const expectedSignature = hmacSha256Hex(signingSecret, signingText);
-    if (signature !== expectedSignature) {
-      res.statusCode = 401;
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ error_code: 'INVALID_SIGNATURE', error_message: 'bad signature' }));
-      return;
-    }
-
-    const payload = JSON.parse(body) as {
-      task_id: string;
-      idempotency_key: string;
-      content: string;
-      preferred_channel: 'browser' | 'official';
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+      id?: number;
+      method?: string;
+      params?: {
+        name?: string;
+        arguments?: Record<string, unknown>;
+      };
     };
 
-    agentCalls.push({ task_id: payload.task_id, content: payload.content });
-    const callCount = (agentCallCounter.get(payload.task_id) ?? 0) + 1;
-    agentCallCounter.set(payload.task_id, callCount);
-
     res.setHeader('content-type', 'application/json');
-    if (callCount === 1) {
+
+    if (body.method === 'initialize') {
+      res.setHeader('mcp-session-id', mcpSessionId);
       res.end(
         JSON.stringify({
-          status: 'waiting_login',
-          channel: payload.preferred_channel,
-          login_session_id: `sess-${payload.task_id}`,
-          login_session_expires_at: new Date(Date.now() + 60_000).toISOString(),
-          login_qr_mime: 'image/png',
-          login_qr_png_base64: 'BASE64PNG',
-          error_code: 'BROWSER_LOGIN_REQUIRED',
-          error_message: 'login required'
+          jsonrpc: '2.0',
+          id: body.id ?? 1,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            serverInfo: {
+              name: 'wechat-unofficial-publisher-agent',
+              version: '2.5.0'
+            }
+          }
         })
       );
       return;
     }
 
+    if (body.method === 'notifications/initialized') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+
+    if (req.headers['mcp-session-id'] !== mcpSessionId) {
+      res.statusCode = 400;
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id ?? null,
+          error: {
+            code: -32000,
+            message: 'missing mcp-session-id'
+          }
+        })
+      );
+      return;
+    }
+
+    if (body.method !== 'tools/call') {
+      res.statusCode = 400;
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id ?? null,
+          error: {
+            code: -32601,
+            message: 'unsupported method'
+          }
+        })
+      );
+      return;
+    }
+
+    const toolName = body.params?.name;
+    const toolArgs = body.params?.arguments ?? {};
+    toolCalls.push(toolName ?? 'unknown');
+
+    const waitingLoginStructured = {
+      status: 'waiting_login',
+      message: 'login required',
+      session: {
+        session_id: `sess-${taskId}`,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        qr: {
+          available: true,
+          format: 'data_url',
+          data: 'data:image/png;base64,BASE64PNG',
+          captured_at: nowIso(),
+          expires_at: new Date(Date.now() + 60_000).toISOString()
+        }
+      },
+      qr: {
+        available: true,
+        format: 'data_url',
+        data: 'data:image/png;base64,BASE64PNG',
+        captured_at: nowIso(),
+        expires_at: new Date(Date.now() + 60_000).toISOString()
+      },
+      browser: {
+        endpoint: null,
+        connected: true,
+        logged_in: false,
+        current_url: null,
+        last_checked_at: nowIso()
+      },
+      error: {
+        code: 'BROWSER_LOGIN_REQUIRED',
+        message: 'wechat login required; manual scan is needed',
+        retryable: true
+      }
+    };
+
+    let structuredContent: Record<string, unknown>;
+    if (toolName === 'publisher_health') {
+      structuredContent = {
+        tool: 'publisher_health',
+        service_status: 'healthy',
+        healthy: true,
+        version: '2.5.0',
+        timestamp: nowIso(),
+        browser: {
+          endpoint: null,
+          connected: true,
+          logged_in: loggedIn,
+          current_url: null,
+          last_checked_at: nowIso()
+        }
+      };
+    } else if (toolName === 'publisher_login_status') {
+      if (loggedIn) {
+        structuredContent = {
+          tool: 'publisher_login_status',
+          status: 'accepted',
+          logged_in: true,
+          message: 'already logged in',
+          session: null,
+          browser: {
+            endpoint: null,
+            connected: true,
+            logged_in: true,
+            current_url: 'https://mp.weixin.qq.com/',
+            last_checked_at: nowIso()
+          },
+          qr: null
+        };
+      } else {
+        structuredContent = {
+          tool: 'publisher_login_status',
+          logged_in: false,
+          ...waitingLoginStructured
+        };
+      }
+    } else if (toolName === 'publisher_login_qr_get') {
+      loggedIn = true;
+      structuredContent = {
+        tool: 'publisher_login_qr_get',
+        ...waitingLoginStructured
+      };
+    } else if (toolName === 'publisher_publish') {
+      publishCalls.push({
+        title: String(toolArgs.title ?? ''),
+        content_html: String(toolArgs.content_html ?? '')
+      });
+      structuredContent = {
+        tool: 'publisher_publish',
+        status: 'accepted',
+        request_id: `req-${taskId}`,
+        message: 'draft saved',
+        accepted_at: nowIso(),
+        session: null,
+        browser: {
+          endpoint: null,
+          connected: true,
+          logged_in: true,
+          current_url: `https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit_v2&task=${taskId}`,
+          last_checked_at: nowIso()
+        },
+        execution: {
+          mode: 'selectors_applied',
+          title_injected: true,
+          body_injected: true,
+          image_inserted: false,
+          link_inserted: false,
+          submit_triggered: false,
+          draft_save_triggered: true,
+          draft_saved: true,
+          draft_save_reason: null,
+          cover_from_content_applied: false,
+          cover_from_content_reason: null,
+          editor_verified: true,
+          content_verified: true,
+          content_length: Number(toolArgs.content_html ? String(toolArgs.content_html).length : 0),
+          current_url: `https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit_v2&task=${taskId}`
+        },
+        error: null
+      };
+    } else {
+      res.statusCode = 200;
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id ?? null,
+          error: {
+            code: -32601,
+            message: `unknown tool: ${String(toolName)}`
+          }
+        })
+      );
+      return;
+    }
+
+    res.statusCode = 200;
     res.end(
       JSON.stringify({
-        status: 'accepted',
-        channel: payload.preferred_channel,
-        publish_url: `https://mp.weixin.qq.com/${payload.task_id}`,
-        task_id: payload.task_id,
-        idempotency_key: payload.idempotency_key
+        jsonrpc: '2.0',
+        id: body.id ?? null,
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: 'ok'
+            }
+          ],
+          structuredContent
+        }
       })
     );
   });
@@ -173,10 +337,16 @@ test('smoke: publish -> waiting_login -> confirm-login -> published', async () =
     assert.equal(taskBody.data.status, 'published');
     assert.ok(taskBody.data.publish_url);
 
-    assert.equal(agentCalls.length, 2);
-    assert.match(agentCalls[0]?.content ?? '', /<h1>hello<\/h1>/i);
-    assert.doesNotMatch(agentCalls[0]?.content ?? '', /<script/i);
-
+    assert.equal(publishCalls.length, 1);
+    assert.match(publishCalls[0]?.content_html ?? '', /<h1>hello<\/h1>/i);
+    assert.doesNotMatch(publishCalls[0]?.content_html ?? '', /<script/i);
+    assert.deepEqual(toolCalls, [
+      'publisher_health',
+      'publisher_login_status',
+      'publisher_login_qr_get',
+      'publisher_login_status',
+      'publisher_publish'
+    ]);
   } finally {
     if (gateway) {
       gateway.close();
